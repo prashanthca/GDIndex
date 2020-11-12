@@ -1,8 +1,8 @@
 module.exports = {
-	input: 'index.js',
+	input: 'test.js',
 	output: {
 		dir: 'dist',
-		fileName: 'worker.js',
+		fileName: 'worker_test.js',
 		format: 'iife'
 	},
 	minify: false,

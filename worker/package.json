@@ -5,7 +5,8 @@
 	"license": "MIT",
 	"dependencies": {
 		"mime": "^2.4.4",
-		"path-to-regexp": "^3.1.0"
+		"path-to-regexp": "^3.1.0",
+		"base64url": "*"
 	},
 	"devDependencies": {
 		"bili": "^4.8.1"

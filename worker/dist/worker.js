@@ -255,6 +255,108 @@ self.props = {
     }) : extend();
   })();
 
+  const str2ab = str => {
+    const buf = new ArrayBuffer(str.length);
+    const bufView = new Uint8Array(buf);
+
+    for (let i = 0, strLen = str.length; i < strLen; i++) {
+      bufView[i] = str.charCodeAt(i);
+    }
+
+    return buf;
+  };
+  const getDERfromPEM = pem => {
+    const pemB64 = pem.trim().split('\n').slice(1, -1) // Remove the --- BEGIN / END PRIVATE KEY ---
+    .join();
+    return str2ab(atob(pemB64));
+  };
+  const b64encodeJSON = obj => btoa(str2ab(JSON.stringify(obj)));
+  const b64encode = btoa;
+  const getEncodedMessage = (header, payload) => {
+    const encodedHeader = b64encodeJSON(header);
+    const encodedPayload = b64encodeJSON(payload);
+    const encodedMessage = `${encodedHeader}.${encodedPayload}`;
+    return encodedMessage;
+  };
+
+  const algorithms = {
+    RS256: {
+      name: 'RSASSA-PKCS1-v1_5',
+      hash: {
+        name: 'SHA-256'
+      }
+    }
+  };
+  const getHeader = (alg, headerAdditions) => ({ ...headerAdditions,
+    alg,
+    typ: 'JWT'
+  }); // XXX https://developers.google.com/identity/protocols/OAuth2ServiceAccount#jwt-auth
+
+  const getToken = async ({
+    privateKeyPEM,
+    payload,
+    alg = 'RS256',
+    cryptoImpl = null,
+    headerAdditions = {}
+  }) => {
+    const algorithm = algorithms[alg];
+
+    if (!algorithm) {
+      throw new Error(`@sagi.io/workers-jwt: Unsupported algorithm ${alg}.`);
+    }
+
+    const privateKeyDER = getDERfromPEM(privateKeyPEM);
+    const privateKey = await crypto.subtle.importKey('pkcs8', privateKeyDER, algorithm, false, ['sign']);
+    const header = getHeader(alg, headerAdditions);
+    const encodedMessage = getEncodedMessage(header, payload);
+    const encodedMessageArrBuf = str2ab(encodedMessage);
+    const signatureArrBuf = await crypto.subtle.sign(algorithms.RS256.name, privateKey, encodedMessageArrBuf);
+    const encodedSignature = b64encode(signatureArrBuf);
+    const token = `${encodedMessage}.${encodedSignature}`;
+    return token;
+  }; // Service Account Authoriazation without OAuth2:
+  // https://developers.google.com/identity/protocols/OAuth2ServiceAccount#jwt-auth
+  // Service Account Auth for OAuth2 Tokens: Choose "HTTP / REST" for:
+  // https://developers.google.com/identity/protocols/OAuth2ServiceAccount
+
+  const getTokenFromGCPServiceAccount = async ({
+    serviceAccountJSON,
+    aud,
+    alg = 'RS256',
+    cryptoImpl = null,
+    expiredAfter = 3600,
+    headerAdditions = {},
+    payloadAdditions = {}
+  }) => {
+    const {
+      client_email: clientEmail,
+      private_key_id: privateKeyId,
+      private_key: privateKeyPEM
+    } = serviceAccountJSON;
+    Object.assign(headerAdditions, {
+      kid: privateKeyId
+    });
+    const iat = parseInt(Date.now() / 1000);
+    const exp = iat + expiredAfter;
+    const iss = clientEmail;
+    const sub = clientEmail;
+    const payload = {
+      aud,
+      iss,
+      sub,
+      iat,
+      exp,
+      ...payloadAdditions
+    };
+    return getToken({
+      privateKeyPEM,
+      payload,
+      alg,
+      headerAdditions,
+      cryptoImpl
+    });
+  };
+
   class GoogleDrive {
     constructor(auth) {
       this.auth = auth;
@@ -265,20 +367,37 @@ self.props = {
     async initializeClient() {
       // any method that do api call must call this beforehand
       if (Date.now() < this.expires) return;
-      const resp = await xf.post('https://www.googleapis.com/oauth2/v4/token', {
-        urlencoded: {
-          client_id: this.auth.client_id,
-          client_secret: this.auth.client_secret,
-          refresh_token: this.auth.refresh_token,
-          grant_type: 'refresh_token'
-        }
-      }).json();
-      this.client = xf.extend({
-        baseURI: 'https://www.googleapis.com/drive/v3/',
-        headers: {
-          Authorization: `Bearer ${resp.access_token}`
-        }
-      });
+
+      if (auth.service_account && typeof auth.service_account_json != "undefined") {
+        var _authURL = this.auth.service_account_json.token_uri;
+        var _sa_json = this.auth.service_account_json;
+        const token = await getTokenFromGCPServiceAccount({
+          _sa_json,
+          _authURL
+        });
+        this.client = xf.extend({
+          baseURI: 'https://www.googleapis.com/drive/v3/',
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        });
+      } else {
+        const resp = await xf.post('https://www.googleapis.com/oauth2/v4/token', {
+          urlencoded: {
+            client_id: this.auth.client_id,
+            client_secret: this.auth.client_secret,
+            refresh_token: this.auth.refresh_token,
+            grant_type: 'refresh_token'
+          }
+        }).json();
+        this.client = xf.extend({
+          baseURI: 'https://www.googleapis.com/drive/v3/',
+          headers: {
+            Authorization: `Bearer ${resp.access_token}`
+          }
+        });
+      }
+
       this.expires = Date.now() + 3500 * 1000; // normally, it should expiers after 3600 seconds
     }
 
